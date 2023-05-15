@@ -1,0 +1,7 @@
+1. Capture EC2 instance metadata
+2. Check for termination protection and enable if not currently enabled
+3. Isolate the instance by moving it to another security group
+4. Detach the Amazon EC2 instance from any AWS Auto Scaling groups
+5. Create a snapshot of the EC2 instance and send a notification
+6. Tag the Amazon EC2 instance with a tag called status with the value of quarantined and send a notification
+7. Detach EBS volume from EC2 instance and attach to a new EC2 instance called 'Forensics' with a SG that allows ingress from the security SG
