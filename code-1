@@ -1,0 +1,61 @@
+import boto3
+import aws_cdk.aws_ec2 as ec2
+from aws_cdk import core
+
+class InstanceIsolationStack(core.Stack):
+    def __init__(self, scope: core.Construct, id: str, instance_id: str, vpc_id: str, **kwargs) -> None:
+        super().__init__(scope, id, **kwargs)
+        self.instance_id = instance_id
+        self.vpc_id = vpc_id
+
+        # Function to capture instance metadata
+        def capture_instance_metadata():
+            ec2_client = boto3.client('ec2')
+            response = ec2_client.describe_instances(InstanceIds=[self.instance_id])
+            instance_metadata = response['Reservations'][0]['Instances'][0]
+            return instance_metadata
+
+        # Function to check for termination protection and enable if not currently enabled
+        def enable_termination_protection():
+            ec2_client = boto3.client('ec2')
+            response = ec2_client.describe_instance_attribute(InstanceId=self.instance_id, Attribute='disableApiTermination')
+            termination_protection = response['DisableApiTermination']['Value']
+
+            if not termination_protection:
+                ec2_client.modify_instance_attribute(InstanceId=self.instance_id, DisableApiTermination={'Value': True})
+                print("Termination protection enabled.")
+            else:
+                print("Termination protection is already enabled.")
+
+        # Create a new security group and move the instance to it
+        def isolate_instance():
+            isolation_sg = ec2.SecurityGroup(
+                self, 'IsolationSecurityGroup',
+                vpc=vpc,
+                description='Isolation Security Group'
+            )
+
+            instance = ec2.Instance.from_instance_attributes(
+                self, 'ExistingInstance',
+                instance_id=self.instance_id
+            )
+            instance.add_security_group(isolation_sg)
+
+        # Capture instance metadata
+        instance_metadata = capture_instance_metadata()
+
+        # Check for termination protection and enable if necessary
+        enable_termination_protection()
+
+        # Move the instance to a new security group
+        vpc = ec2.Vpc.from_lookup(self, 'VPC', vpc_id=self.vpc_id)
+        isolate_instance()
+
+# Replace the placeholders with actual values
+INSTANCE_ID = 'YOUR_INSTANCE_ID'
+VPC_ID = 'YOUR_VPC_ID'
+
+# Initialize the AWS CDK app and stack
+app = core.App()
+stack = InstanceIsolationStack(app, "MyStack", instance_id=INSTANCE_ID, vpc_id=VPC_ID)
+app.synth()
