@@ -1,0 +1,43 @@
+from aws_cdk import (
+    aws_autoscaling as autoscaling,
+    aws_ec2 as ec2,
+    core
+)
+
+
+class MyStack(core.Stack):
+
+    def __init__(self, scope: core.Construct, id: str, **kwargs) -> None:
+        super().__init__(scope, id, **kwargs)
+
+        # Create a new auto scaling group
+        auto_scaling_group = autoscaling.AutoScalingGroup(
+            self,
+            "MyAutoScalingGroup",
+            instance_type=ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE2, ec2.InstanceSize.MICRO),
+            machine_image=ec2.AmazonLinuxImage(),
+            desired_capacity=1,
+            min_capacity=1,
+            max_capacity=3
+        )
+
+        # Add the auto scaling group to the stack
+        self.auto_scaling_group = auto_scaling_group
+
+        # Create an EC2 instance
+        instance = ec2.Instance(
+            self,
+            "MyEC2Instance",
+            instance_type=ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE2, ec2.InstanceSize.MICRO),
+            machine_image=ec2.AmazonLinuxImage()
+        )
+
+        # Add the EC2 instance to the auto scaling group
+        auto_scaling_group.add_instance(instance)
+
+        # Detach the EC2 instance from the auto scaling group
+        auto_scaling_group.detach_instances(autoscaling.AutoScalingGroupInstancesRef(instance.instance_id))
+
+app = core.App()
+MyStack(app, "MyStack")
+app.synth()
