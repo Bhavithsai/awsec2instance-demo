@@ -1,0 +1,97 @@
+import unittest
+from unittest.mock import MagicMock
+from botocore.exceptions import NoCredentialsError
+
+# Import the functions and class from the previous code
+
+class TestEC2Management(unittest.TestCase):
+
+    def setUp(self):
+        # Create a mock EC2 client for testing
+        self.mock_ec2_client = MagicMock()
+        boto3.client = MagicMock(return_value=self.mock_ec2_client)
+
+    def test_capture_instance_metadata(self):
+        # Mock the describe_instances response
+        response = {
+            'Reservations': [
+                {
+                    'Instances': [
+                        {
+                            'InstanceId': 'your-instance-id',
+                            'InstanceType': 't2.micro',
+                            'State': {
+                                'Name': 'running'
+                            },
+                            'SecurityGroups': [
+                                {
+                                    'GroupId': 'security-group-id',
+                                    'GroupName': 'security-group'
+                                }
+                            ]
+                            # Include more relevant instance metadata as needed
+                        }
+                    ]
+                }
+            ]
+        }
+
+        # Set the mock response for describe_instances
+        self.mock_ec2_client.describe_instances = MagicMock(return_value=response)
+
+        # Call the function
+        metadata = capture_instance_metadata('your-instance-id')
+
+        # Assertions
+        self.assertEqual(metadata['InstanceId'], 'your-instance-id')
+        self.assertEqual(metadata['InstanceType'], 't2.micro')
+        self.assertEqual(metadata['State']['Name'], 'running')
+        self.assertEqual(metadata['SecurityGroups'][0]['GroupId'], 'security-group-id')
+
+    def test_check_and_enable_termination_protection(self):
+        # Mock the describe_instance_attribute response
+        response = {
+            'DisableApiTermination': {
+                'Value': False
+            }
+        }
+
+        # Set the mock response for describe_instance_attribute
+        self.mock_ec2_client.describe_instance_attribute = MagicMock(return_value=response)
+
+        # Call the function
+        check_and_enable_termination_protection('your-instance-id')
+
+        # Assertions
+        self.mock_ec2_client.modify_instance_attribute.assert_called_with(
+            InstanceId='your-instance-id',
+            DisableApiTermination={'Value': True}
+        )
+
+    def test_isolate_instance(self):
+        # Call the function
+        isolate_instance('your-instance-id', 'your-security-group-id')
+
+        # Assertions
+        self.mock_ec2_client.modify_instance_attribute.assert_called_with(
+            InstanceId='your-instance-id',
+            Groups=['your-security-group-id']
+        )
+
+    def test_detach_from_auto_scaling_group(self):
+        # Mock the AutoScalingGroup class and its detach_from_auto_scaling_group method
+        mock_auto_scaling_group = MagicMock()
+        aws_autoscaling.AutoScalingGroup = MagicMock(return_value=mock_auto_scaling_group)
+
+        # Call the class constructor to create the AutoScalingGroup instance
+        MyStack(None, None)
+
+        # Call the function
+        MyStack.detach_from_auto_scaling_group('your-instance-id')
+
+        # Assertions
+        mock_auto_scaling_group.detach_from_auto_scaling_group.assert_called_with(instance_id='your-instance-id')
+
+
+if __name__ == '__main__':
+    unittest.main()
