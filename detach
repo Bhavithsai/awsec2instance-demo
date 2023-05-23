@@ -1,0 +1,13 @@
+# Step 4: Detach the Amazon EC2 instance from any AWS Auto Scaling groups
+        autoscaling_client = boto3.client('autoscaling')
+        response = autoscaling_client.describe_auto_scaling_instances(InstanceIds=[instance_id])
+        for asg_instance in response['AutoScalingInstances']:
+            autoscaling_client.detach_instances(InstanceIds=[instance_id], AutoScalingGroupName=asg_instance['AutoScalingGroupName'], ShouldDecrementDesiredCapacity=True)
+
+        # Step 5: Create a snapshot of the EC2 instance and send a notification
+        ec2_client.create_snapshot(InstanceId=instance_id)
+        # Add code to send a notification (e.g., via SNS or another method) with the snapshot details
+
+        # Step 6: Tag the Amazon EC2 instance with a tag called "status" with the value of "quarantined" and send a notification
+        ec2_client.create_tags(Resources=[instance_id], Tags=[{'Key': 'status', 'Value': 'quarantined'}])
+        # Add code to send a notification (e.g., via SNS or another method) with the tag details
