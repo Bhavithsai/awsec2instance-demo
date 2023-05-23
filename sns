@@ -1,0 +1,34 @@
+     # EC2 instance snapshot
+        snapshot = ec2.CfnEIP(self, 'MyEC2Snapshot',
+            description='Snapshot of MyEC2Instance',
+            instance_id=instance.instance_id,
+        )
+
+        # SNS topic for notifications
+        topic = sns.Topic(self, 'MySNSTopic')
+
+        # Subscribe to the topic
+        topic.add_subscription(sns.Subscription(
+            protocol=sns.SubscriptionProtocol.EMAIL,
+            endpoint='your-email@example.com'
+        ))
+
+        # Publish notification when snapshot is created
+        snapshot.node.add_dependency(topic)
+        snapshot.apply_removal_policy(core.RemovalPolicy.DESTROY)
+        snapshot.add_property_override('DeletionPolicy', 'Delete')
+        snapshot.add_property_override('UpdateReplacePolicy', 'Delete')
+        sns.CfnTopicPolicy(self, 'MySNSTopicPolicy',
+            topics=[topic.topic_arn],
+            policy_document={
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {
+                        "AWS": "*"
+                    },
+                    "Action": "sns:Publish",
+                    "Resource": topic.topic_arn,
+                }]
+            }
+        )
