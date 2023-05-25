@@ -1,0 +1,126 @@
+from constructs import Construct
+import aws_cdk as cdk
+from aws_cdk import (
+    Duration,
+    Stack,
+    aws_ec2 as ec2,
+    aws_iam as iam,
+    aws_sqs as sqs,
+    aws_sns as sns,
+    aws_sns_subscriptions as subs,
+    aws_autoscaling as asg,
+    CfnOutput
+)
+
+app = cdk.App()
+
+class Ec2IsolationStack(Stack):
+
+    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+
+        vpc = ec2.Vpc.from_lookup(self, "test", vpc_name = app.node.try_get_context("vpcname"), vpc_id=app.node.try_get_context("vpcid"))
+        role = iam.Role(self, "InstanceSSM", assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"))
+        role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("AmazonSSMManagedInstanceCore"))
+        testinstance = ec2.Instance(self, "Isolatedinstance",
+            instance_type=ec2.InstanceType("t2.micro"),
+            machine_image=ec2.MachineImage.latest_amazon_linux2(),
+	        vpc = vpc,
+	        role = role
+	        )
+        isolation_security_group = ec2.SecurityGroup(self, "EC2IsolationSecurityGroup",vpc=vpc)
+        
+        isolation_security_group.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(22))
+        
+        ec2_asg = asg.AutoScalingGroup(self, "myASG",
+									vpc=vpc,
+									vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
+									instance_type=ec2.InstanceType("t2.micro"),
+									machine_image=ec2.MachineImage.latest_amazon_linux2(),
+									desired_capacity=1,
+									min_capacity=1,
+									max_capacity=1,
+									)
+        
+        topic = sns.Topic(self, "Topic", display_name="IsolateAlarmTopic")
+        topic.add_subscription(subs.EmailSubscription("bijaylaxmi.giri@op.fi"))
+        
+        CfnOutput(scope=self, id='IsolatedInstance', export_name="testinstance:InstanceId", description="isolated instance id", value=testinstance.instance_id)
+        #stack.py
+        import aws_cdk as cdk
+from aws_cdk import (
+	Fn,
+	CfnOutput,
+	Duration,
+	Environment,
+	Stack,
+	aws_ec2 as ec2,
+	aws_stepfunctions as sfn,
+	aws_stepfunctions_tasks as tasks,
+)
+import os
+
+from constructs import Construct
+
+app = cdk.App()
+
+class Ec2IsolationsfStack(Stack):
+
+	def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+		super().__init__(scope, construct_id, **kwargs)
+
+		vpc = ec2.Vpc.from_lookup(self, app.node.try_get_context("vpcname"), vpc_id=app.node.try_get_context("vpcid"))
+		
+		IsolatedInstanceId = Fn.import_value("testinstance:InstanceId")
+		
+		describe_ec2metadata_task = tasks.CallAwsService(self, "Get EC2 Instance Info",
+										service="ec2",
+										action="describeInstances",
+										parameters={
+											"InstanceIds": sfn.JsonPath.string_at("States.Array($.IsolatedInstanceId)")
+										},
+										result_path=sfn.JsonPath.string_at("$.InstanceDescription"),
+										iam_resources=["*"])
+										
+		
+		enable_apiec2termination_task = tasks.CallAwsService(self, "Disable EC2 Termination",
+													service="ec2",
+													action="modifyInstanceAttribute",
+													parameters={
+														"InstanceId": sfn.JsonPath.string_at("$.IsolatedInstanceId"),
+														"DisableApiTermination": {
+															"Value": "true"
+														}
+													},
+													iam_resources=["*"],
+													result_path=sfn.JsonPath.DISCARD
+												)
+												
+		create_snapshot_from_isolated_instance_task = tasks.CallAwsService(self, "Create Snapshot from Isolated Instance",
+																	service="ec2",
+																	action="createSnapshot",
+																	parameters={
+																	"VolumeId": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId")
+																	},
+																	iam_resources=["*"],
+																	result_path=sfn.JsonPath.string_at("$.SnapshotId")
+																)
+																
+		
+		chain = sfn.Chain.start(describe_ec2metadata_task).next(enable_apiec2termination_task).next(create_snapshot_from_isolated_instance_task)
+		sm = sfn.StateMachine(self, "StateMachine", definition=chain)
+		CfnOutput(self, "StepFunctionArn", description="Step function ARN", value=sm.state_machine_arn)
+    #app.py
+    #!/usr/bin/env python3
+
+import aws_cdk as cdk
+
+from ec2isolation.pipeline_stack import PipelinestackStack
+
+app = cdk.App()
+accountid = app.node.try_get_context("accountid")
+region = app.node.try_get_context("region")
+test_env = cdk.Environment(account=accountid, region=region)
+PipelinestackStack(app, "Pipelinestack", env=test_env)
+
+app.synth()
