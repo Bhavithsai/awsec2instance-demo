@@ -1,0 +1,74 @@
+from aws_cdk import (Stack, aws_stepfunctions as sfn, aws_stepfunctions_tasks as tasks)
+from constructs import Construct
+
+class Ec2IsolateStack(Stack):
+
+    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+
+        ec2_instances = tasks.CallAwsService(self,"InstanceMetadata",
+        service = "ec2",
+        action = "ec2Metadata",
+        Parameters = {"InstanceIds": sfn.JsonPath.string_at("States.Array($.IsolatedInstanceId)")},
+        result_path=sfn.JsonPath.string_at("$.InstanceDescription"),
+        iam_resources=["*"])
+        
+#base infra
+from constructs import Construct
+import aws_cdk as cdk
+from aws_cdk import (Stack,aws_ec2 as ec2, aws_elasticloadbalancing  as elb, aws_autoscaling as asg)
+
+app = cdk.App()
+
+class BaseInfra(Stack):
+
+    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+        
+        machine_image =ec2.MachineImage.latest_amazon_linux(generation=ec2.AmazonLinuxGeneration.AMAZON_LINUX_2)
+        vpc = ec2.Vpc.from_lookup(self, "vpc", vpc_name=app.node.try_get_context("VPC-NAME"), vpc_id=app.node.try_get_context("VPC-ID"))
+
+        #Isolate_Instance = ec2.Instance(self, "Isolate_Instance",
+        #                        instance_type=ec2.InstanceType("t2.micro"),
+        #                        instance_name="Isolate_Instance",
+        #                        machine_image=machine_image,
+        #                        vpc= vpc
+        #                    )
+                      
+        Isolate_Instance_ASG =  asg.AutoScalingGroup(self, "Isolate_Instance_ASG",
+        vpc=vpc,
+        #vpc_subnets = ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+        auto_scaling_group_name = "Isolate_Instance_ASG",
+        instance_type=ec2.InstanceType("t2.micro"),
+        machine_image=machine_image,
+        max_capacity= 3,
+        min_capacity= 2,
+        desired_capacity= 2
+        )     
+                            
+        Isolate_Instance_LB = elb.LoadBalancer(self, "Isolate_Instance_LB",
+        vpc=vpc,
+        subnet_selection=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC), 
+        #internet_facing=True,
+        health_check=elb.HealthCheck(port=80)
+        )
+        #Isolate_Instance_LB.add_target(elb.InstanceTarget(Isolate_Instance))
+        Isolate_Instance_LB.add_target(Isolate_Instance_ASG)
+        Isolate_Instance_LB.add_listener(external_port=80)
+        #app.py
+        #!/usr/bin/env python3
+import os
+
+import aws_cdk as cdk
+
+from ec2_isolate.pipeline_stack import PipelineStack
+
+
+app = cdk.App()
+
+accountid = app.node.try_get_context("accountid")
+region = app.node.try_get_context("region")
+
+env_EU = cdk.Environment(account=accountid, region=region)  
+PipelineStack(app, "pipelinestack", env=env_EU)
+app.synth()
