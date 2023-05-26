@@ -114,8 +114,18 @@ class IsolateEc2Stack(Stack):
         )
         
         #Send Email about SnapshotID - pending
-        ###################################
-        ###################################
+        send_email = sns.Topic(self, "SendEmailTopic")
+        send_email.add_subscription(subscriptions.EmailSubscription("abhishek.pal@op.fi"))
+        tasks.CallAwsService(self, "Send Email about SnapshotID",
+            service="sns",
+            action="publish",
+            parameters={
+                "TopicArn": send_email.topic_arn,
+                "Message": sfn.JsonPath.string_at("$.SnapshotId")
+            },
+            iam_resources=["*"],
+            result_path=sfn.JsonPath.DISCARD
+        )
         
         #create forensic instance
         create_forensic_instance = tasks.CallAwsService(self, " Forensics Instance",
