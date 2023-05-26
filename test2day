@@ -1,0 +1,36 @@
+def test_tag_ec2_instance(self):
+    # Create an instance.
+    env=cdk.Environment(account="600032437742", region="eu-central-1)
+    stack = BasicInfraDevStack(app,"ec2-isolation", env= env)
+    template = assertion.Template.from_stack(stack)
+    # Assert that the instance is tagged.
+    assert core.Tags.of(instance).get("status") == "quarantined"
+
+def test_stack_creation(self):
+    env=cdk.Environment(account="600032437742", region="eu-central-1)
+    stack = BasicInfraDevStack(app,"ec2-isolation", env= env)
+    template = assertion.Template.from_stack(stack)
+    # Assert that the stack has been created
+    self.assertIsNotNone(stack)
+
+    # Assert the number of resources in the stack
+    self.assertEqual(len(stack.node.children), 1)  # Assuming only one construct in the stack
+
+    # Assert the specific resources created in the stack
+    # Modify the assertions based on your specific resource expectations
+    self.assertIsInstance(stack.node.children[0], sns.Topic)  # SNS Topic
+    self.assertIsInstance(stack.node.children[1], tasks.CallAwsService)  # Instance Metadata task
+
+def test_metadata_creation(self):
+    env=cdk.Environment(account="600032437742", region="eu-central-1)
+    stack = BasicInfraDevStack(app,"ec2-isolation", env= env)
+    template = assertion.Template.from_stack(stack)
+      
+    # Check if the instance metadata construct exists
+    metadata_construct = self.deployed_stack.node.try_get_child_by_type(tasks.CallAwsService)
+    self.assertIsNotNone(metadata_construct)
+
+    # Assert the specific properties of the metadata construct
+    # Modify the assertions based on your specific expectations
+    self.assertEqual(metadata_construct.service, "ec2")
+    self.assertEqual(metadata_construct.action, "describeInstances")
