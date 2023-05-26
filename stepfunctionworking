@@ -1,0 +1,193 @@
+import aws_cdk as cdk
+from constructs import Construct
+from aws_cdk import (
+    Stack,
+    aws_stepfunctions as sfn,
+    aws_stepfunctions_tasks as tasks,
+    aws_ec2 as ec2,
+    aws_sns as sns,
+    aws_sns_subscriptions as subscriptions,
+    )
+from .basic_infra_dev_stack import BasicInfraDevStack
+    
+app = cdk.App()
+
+class IsolateEc2Stack(Stack):
+    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+        
+        #create SNS topic
+        notification_SNS_topic = sns.Topic(self, "SNS topic", topic_name="teamC-topic")
+        notification_SNS_topic.add_subscription(
+            subscriptions.EmailSubscription("abhishek.pal@op.fi")
+        )
+        
+        #instance metadata collection
+        instance_metadata = tasks.CallAwsService(self, "instance Metadata", 
+            service = "ec2",
+            action = "describeInstances",
+            parameters = {
+                "InstanceIds" : sfn.JsonPath.string_at("States.Array($.InstanceId)")
+            },
+            iam_resources = ["*"],
+            result_path = sfn.JsonPath.string_at("$.InstanceDescription"),
+        )
+        
+        #create isolation SG
+        isolation_sg = ec2.SecurityGroup(
+            self, 'IsolationSecurityGroup-alpha',
+            vpc = sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].NetworkInterfaces[0].VpcId"),
+            description = 'Isolation Security Group team dev'
+            )
+        isolation_sg.add_ingress_rule(
+        ec2.Peer.any_ipv4(), ec2.Port.tcp(22))
+        
+        #Enable termination protection
+        EC2_termination_protection = tasks.CallAwsService(self, "Enable termination protection",
+            service = "ec2",
+            action = "modifyInstanceAttribute",
+            parameters = {
+                "InstanceId" : sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].InstanceId"),
+                    "DisableApiTermination" : {
+                        "Value" : "true"
+                    }
+            },
+            iam_resources = ["*"],
+            result_path = sfn.JsonPath.string_at("$.EnableTermination"),
+        )
+        
+        #attach isolation security group to instance - 
+        modify_instance_sg = tasks.CallAwsService(self, "modify Instance SG",
+            service = "ec2",
+            action = "authorizeSecurityGroupIngress",
+            parameters = {
+                "GroupId": sfn.JsonPath.string_at("$[1].InstanceDescription.Reservations[0].Instances[0].SecurityGroups[0].GroupId"),
+                "IpPermissions": [
+                    {
+                        "IpProtocol": "-1",
+                        "FromPort": -1,
+                        "UserIdGroupPairs": [
+                            {
+                                "GroupId": self.isolation_sg.security_group_id
+                            }
+                        ]
+                    }
+                ]
+            },
+            iam_resources = ["*"],
+            result_path = sfn.JsonPath.string_at("$.ModifySG")
+        )
+        
+        #Check auto scaling group info
+        auto_scaling_info = tasks.CallAwsService(self, "Get Autosacling Group Info",
+            service = "autoscaling",
+            action = "describeAutoScalingInstances",
+            parameters = {
+                "InstanceIds" : sfn.JsonPath.string_at("States.Array($.InstanceId)")
+            },
+            iam_resources = ["*"],
+            result_path = sfn.JsonPath.string_at("$.AutoScalingResult")
+        )
+        
+        #Detach EC2 from auto scaling group
+        detach_ec2_from_asg =  tasks.CallAwsService(self, "Detch EC2 from ASG",
+            service = "autoscaling",
+            action = "detachInstances",
+            parameters = {
+                "AutoScalingGroupName" :  sfn.JsonPath.string_at("$.AutoScalingResult.AutoScalingInstances[0].AutoScalingGroupName"),
+                "ShouldDecrementDesiredCapacity": "false",
+                 "InstanceIds" : sfn.JsonPath.string_at("States.Array($.InstanceId)")
+            },
+            iam_resources = ["*"],
+            result_path = sfn.JsonPath.DISCARD
+        )
+        
+        #Create snapshot from isolated instance
+        create_snapshot =  tasks.CallAwsService(self, "Create Snapshot from Isolated Instance",
+            service = "ec2",
+            action = "createSnapshot",
+            parameters = {
+                "VolumeId": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId")
+            },
+            iam_resources = ["*"],
+            result_path = sfn.JsonPath.string_at("$.SnapshotId")
+        )
+        
+        #Send Email about SnapshotID - pending
+        ###################################
+        ###################################
+        
+        #create forensic instance
+        create_forensic_instance = tasks.CallAwsService(self, " Forensics Instance",
+            service = "ec2",
+            action = "runInstances",
+            parameters = {
+                "MaxCount": 1,
+                "MinCount": 1,
+                "InstanceType": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].InstanceType"),
+                "ImageId": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].ImageId"),
+                "SubnetId": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].NetworkInterfaces[0].SubnetId"),
+                "SecurityGroupIds": [
+                    self.isolation_sg.security_group_id
+                ]
+            },
+            iam_resources=["*"],
+            result_selector={
+                "ForensicInstanceId": sfn.JsonPath.string_at("$.Instances[0].InstanceId")
+            }
+        )
+        
+        #create EBS volume from Snapshot
+        EBS_volume_from_snapshot =  tasks.CallAwsService(self, "Create EBS Volume from Snapshot",
+            service = "ec2",
+            action = "createVolume",
+            parameters = {
+                 "AvailabilityZone": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].Placement.AvailabilityZone"),
+                 "SnapshotId": sfn.JsonPath.string_at("$.SnapshotId.SnapshotId")
+            },
+             iam_resources = ["*"],
+             result_path = sfn.JsonPath.string_at("$.Volumes")
+        )
+        
+        #Check EBS volume creation
+        ebs_volume_status_check = tasks.CallAwsService(self, "Get EBS Volume Status",
+            service="ec2",
+            action="describeVolumes",
+            parameters = {
+                "VolumeIds": sfn.JsonPath.string_at("States.Array($.Volumes.VolumeId)")
+            },
+            iam_resources = ["*"],
+            result_path = sfn.JsonPath.string_at("$.VolumeDescription")
+        )
+        
+        #attach volume to forensic instance
+        attach_volume =  tasks.CallAwsService(self, "Attach Volume",
+            service="ec2",
+            action="attachVolume",
+            parameters={
+                "Device": "/dev/sdf",
+                "InstanceId": sfn.JsonPath.string_at("$[0].ForensicInstanceId"),
+                "VolumeId": sfn.JsonPath.string_at("$[1].Volumes.VolumeId")
+            },
+            iam_resources = ["*"],
+            result_path = sfn.JsonPath.DISCARD
+        )
+        
+        #tag forensic instance with tag quarantine
+        tag_instance = tasks.CallAwsService(self, "Tag Instance as Quarntie",
+            service="ec2",
+            action="createTags",
+            parameters={
+                "Resources":  sfn.JsonPath.string_at("States.Array($[1].InstanceId)"),
+                "Tags": [
+                    {
+                        "Key": "Environment",
+                        "Value": "Quarantine"
+                    }
+                ]
+            },
+            iam_resources = ["*"]
+        )
+        #Send Email about SnapshotID - pending
+        ###################################
+        ###################################
