@@ -1,0 +1,101 @@
+import unittest
+from unittest.mock import MagicMock
+from aws_cdk import core
+from my_cdk_project.my_cdk_project_stack import MyCdkProjectStack
+
+class IntegrationTest(unittest.TestCase):
+    def setUp(self):
+        self.app = core.App()
+        self.stack = MyCdkProjectStack(self.app, "TestStack", vpc_id="vpc-12345678")
+    
+    def test_instance_metadata_collection(self):
+        # Simulate the instance metadata collection task
+        instance_metadata_task = self.stack.instance_metadata.node.default_child
+        instance_metadata_task.call_aws_service = MagicMock()
+        instance_metadata_task.call_aws_service.return_value = {
+            "InstanceDescription": {
+                "Reservations": [
+                    {
+                        "Instances": [
+                            {
+                                "InstanceId": "i-12345678"
+                                # Add other necessary attributes here
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+        
+        # Execute the state machine
+        execution = self.stack.run_state_machine()
+        
+        # Verify that the instance metadata was collected
+        self.assertEqual(execution.output["InstanceDescription"]["Reservations"][0]["Instances"][0]["InstanceId"], "i-12345678")
+    
+    def test_isolation_sg_ingress_rule(self):
+        # Simulate the creation of the isolation security group
+        isolation_sg = self.stack.isolation_sg
+        isolation_sg.add_ingress_rule = MagicMock()
+        
+        # Execute the state machine
+        self.stack.run_state_machine()
+        
+        # Verify that the ingress rule was added to the isolation security group
+        isolation_sg.add_ingress_rule.assert_called_once_with(
+            ec2.Peer.any_ipv4(),
+            ec2.Port.tcp(22)
+        )
+    
+    def test_termination_protection_enabled(self):
+        # Simulate enabling termination protection for the EC2 instance
+        ec2_client = MagicMock()
+        self.stack.enable_termination_protection.call_aws_service = MagicMock()
+        self.stack.enable_termination_protection.call_aws_service.return_value = {
+            "EnableTermination": {
+                "SomeAttribute": "SomeValue"
+                # Add other necessary attributes here
+            }
+        }
+        
+        # Execute the state machine
+        self.stack.run_state_machine()
+        
+        # Verify that termination protection was enabled
+        self.stack.enable_termination_protection.call_aws_service.assert_called_once_with(
+            service="ec2",
+            action="modifyInstanceAttribute",
+            parameters={
+                "InstanceId": "i-12345678",
+                "DisableApiTermination": {
+                    "Value": "true"
+                }
+            }
+        )
+    
+    def test_snapshot_creation_and_email_sending(self):
+        # Simulate creating a snapshot from the isolated instance
+        snapshot_id = "snap-12345678"
+        self.stack.create_snapshot.call_aws_service = MagicMock()
+        self.stack.create_snapshot.call_aws_service.return_value = {
+            "SnapshotId": snapshot_id
+        }
+        
+        # Simulate publishing an email notification
+        email_client = MagicMock()
+        self.stack.send_email.call_aws_service = email_client
+        
+        # Execute the state machine
+        execution = self.stack.run_state_machine()
+        
+        # Verify that a snapshot was created
+        self.assertEqual(execution.output["SnapshotId"], snapshot_id)
+        
+        # Verify that an email notification was sent with the snapshot ID
+        email_client.publish.assert_called_once_with(
+            TopicArn=self.stack.notification_SNS_topic.topic_arn,
+            Message=snapshot_id
+        )
+    
+if __name__ == '__main__':
+    unittest.main()
