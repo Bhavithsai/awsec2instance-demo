@@ -5,3 +5,4 @@
 5. Create a snapshot of the EC2 instance and send a notification
 6. Tag the Amazon EC2 instance with a tag called status with the value of quarantined and send a notification
 7. Detach EBS volume from EC2 instance and attach to a new EC2 instance called 'Forensics' with a SG that allows ingress from the security SG
+https://oppgit.eficode.com/projects/PCTCSDEV
