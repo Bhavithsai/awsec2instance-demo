@@ -1,0 +1,25 @@
+import aws_cdk as cdk
+import aws_cdk.assertions as assertions
+from ec2isolation.ec2isolation_infra_stack import Ec2IsolationStack
+
+
+app = cdk.App()
+
+
+def test_ec2_created():
+    
+    env_test = cdk.Environment(account="600032437742", region="eu-central-1")
+    #vpc= ec2.Vpc.from_lookup(self, "opcf op-tcs deployment", vpc_id="vpc-0bd4b61810acf1bbe") 
+    stack = Ec2IsolationStack(app, "ec2isolation", env=env_test)
+    template = assertions.Template.from_stack(stack)
+
+    template.resource_count_is("AWS::EC2::Instance", 1)
+
+
+def test_sns_topic_created():
+    app = cdk.App()
+    env_test = cdk.Environment(account="600032437742", region="eu-central-1")
+    stack = Ec2IsolationStack(app, "ec2isolation", env=env_test)
+    template = assertions.Template.from_stack(stack)
+
+    template.resource_count_is("AWS::SNS::Topic", 1)
