@@ -1,0 +1,349 @@
+import aws_cdk as cdk
+from constructs import Construct
+from aws_cdk import (Stack, aws_stepfunctions as sfn, aws_stepfunctions_tasks as tasks, aws_ec2 as ec2)
+from aws_cdk import (Fn, CfnOutput,Duration)
+from aws_cdk import (aws_sns as sns, aws_sns_subscriptions as subscriptions)
+
+app = cdk.App()
+
+class SfnStack(Stack):
+
+    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+        
+        # Create SNS topic to send alerts which is used in stepfunctions
+         
+        EC2Isolate_topic = sns.Topic(self, "EC2Isolate_topic", topic_name="EC2Isolate_topic")
+        EC2Isolate_topic.add_subscription(
+            subscriptions.EmailSubscription("supritha.k@op.fi")
+        )
+
+        # Main code starts here
+        # Step Function stage creation
+        # Stepfunction stage to collect Instance metadata
+
+        Collect_Instance_Metadata = tasks.CallAwsService(self,"Get EC2 Instance Metadata",
+        service = "ec2",
+        action = "describeInstances",
+        parameters = {
+            "InstanceIds": sfn.JsonPath.string_at("States.Array($.InstanceId)")
+        },
+        iam_resources=["*"],
+        result_path=sfn.JsonPath.string_at("$.InstanceDescription"),
+        )
+        
+        # Stepfunction Stage to Enable Instance Termination Protection If not enabled
+        
+        Enable_Termination_Protection = tasks.CallAwsService(self,"Enable Termination Protection",
+        service = "ec2",
+        action = "modifyInstanceAttribute",
+        parameters ={
+            "InstanceId": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].InstanceId"),
+                "DisableApiTermination": {
+                    "Value": "true"
+                }
+            },
+            iam_resources=["*"],
+            result_path=sfn.JsonPath.string_at("$.EnableTermination"),
+        )
+        
+         # Create Security group for Forensic Instance
+        
+        Create_ForensicSG = tasks.CallAwsService(self, "create security for Forensics Instances",
+            service="ec2",
+            action="createSecurityGroup",
+            parameters={
+                "Description": "ForensicInstanceSG",
+                "GroupName": "ForensicInstanceSG",
+                "VpcId": sfn.JsonPath.string_at("$[1].InstanceDescription.Reservations[0].Instances[0].NetworkInterfaces[0].VpcId"),
+                
+            },
+            result_path=sfn.JsonPath.string_at("$.ForensicInstanceSG"),
+            iam_resources=["*"])
+        
+        # Create Security group to move the Isolated instance.
+        
+        Create_ec2_IsolatedSG = tasks.CallAwsService(self, "create security group to Isolate Instance",
+            service="ec2",
+            action="createSecurityGroup",
+            parameters={
+                "Description": "EC2IsolateSG",
+                "GroupName": "EC2IsolateSG",
+                "VpcId": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].NetworkInterfaces[0].VpcId"),
+                
+            },
+            result_path=sfn.JsonPath.string_at("$.CreateSG"),
+            iam_resources=["*"])
+            
+        add_ingress_to_SG = tasks.CallAwsService(self, " Add Ingress rule to new SG",
+        service="ec2",
+        action="authorizeSecurityGroupIngress",
+        parameters={
+            "GroupId": sfn.JsonPath.string_at("$.CreateSG.GroupId"),
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort" : 22,
+                    "UserIdGroupPairs": [
+                        {
+                            "GroupId": sfn.JsonPath.string_at("$.CreateSG.GroupId")
+                            
+                        }
+                        ]
+                }
+                ]
+        },
+        iam_resources=["*"],
+        result_path=sfn.JsonPath.DISCARD
+        )
+        
+        # Isolate Instance by moving to new security group
+        
+        Modify_Instance_SG = tasks.CallAwsService(self, "Modify EC2 Instance SG",
+            service="ec2",
+            action="modifyInstanceAttribute",
+            parameters={
+                "InstanceId": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].InstanceId"),
+                "Groups": sfn.JsonPath.string_at("States.Array($.CreateSG.GroupId)")
+            },
+            result_path=sfn.JsonPath.string_at("$.ModifySG"),
+            iam_resources=["*"])
+        
+        # Verify If the Instance to be Isolated is attached to an autoscaling group
+        
+        Verify_ASG_Attachment = tasks.CallAwsService(self, "Verify ASG Attachment",
+            service="autoscaling",
+            action="describeAutoScalingInstances",
+            parameters={
+                "InstanceIds": sfn.JsonPath.string_at("States.Array($.InstanceId)")
+            },
+            iam_resources=["*"],
+            result_path=sfn.JsonPath.string_at("$.AutoScalingAttachment")
+        )
+        
+        # Create Choice state to detach Instance from ASG based on Attachment Info
+        
+        ASG_Choice = sfn.Choice(self, "ASG Attached?")
+
+        ASG_Attachment_Info = sfn.Condition.is_present(variable="$.AutoScalingAttachment.AutoScalingInstances[0].AutoScalingGroupName")
+        
+        # Detach Instance to be Isolated from the autoscaling group 
+        
+        Detach_Instance_from_ASG = tasks.CallAwsService(self, "Detach Instance from ASG",
+            service="autoscaling",
+            action="detachInstances",
+            parameters={
+                "AutoScalingGroupName": sfn.JsonPath.string_at("$.AutoScalingAttachment.AutoScalingInstances[0].AutoScalingGroupName"),
+                "ShouldDecrementDesiredCapacity": "false",
+                "InstanceIds": sfn.JsonPath.string_at("States.Array($.IsolatedInstanceId)")
+            },
+            iam_resources=["*"],
+            result_path=sfn.JsonPath.string_at("$.DetachInstance")
+        )
+        
+        # Create Snaphot from the Isolated Instance volume
+        
+        Create_Snapshot = tasks.CallAwsService(self,"Create Snapshot of the Instance",
+            service = "ec2",
+            action = "createSnapshot",
+            parameters ={
+                "VolumeId": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId")
+             },
+            iam_resources=["*"],
+            result_path=sfn.JsonPath.string_at("$.SnapshotId")
+        )
+        
+        # Stage to describe Snapshot status
+        
+        Verify_snapshot_creation_status = tasks.CallAwsService(self, "Verify snapshot creation",
+            service="ec2",
+            action="describeSnapshots",
+            parameters={
+                "SnapshotIds": sfn.JsonPath.string_at("States.Array($.SnapshotId.SnapshotId)")
+            },
+            iam_resources=["*"],
+            result_path=sfn.JsonPath.string_at("$.SnapshotStatus"),
+            result_selector={"SnapshotState": sfn.JsonPath.string_at("$.Snapshots.[0].State")}
+        )
+
+        #Verify if the Snapshot creation is Complete
+        
+        Is_snapshot_creation_complete = sfn.Choice(
+            self, "Is snapshot creation completed?")
+            
+        Snapshot_creation_successful = sfn.Condition.string_equals(variable="$.SnapshotStatus.SnapshotState",value="completed")
+        
+        wait_for_snaphot_creation = sfn.Wait(
+            self, "Wait for Snapshot Creation to be completed", time=sfn.WaitTime.duration(Duration.seconds(30)))
+        
+        # Notify snapshot creation using SNS
+        
+        sns_for_create_snaphot = tasks.SnsPublish(
+            self,
+            "SNS for snapshot creation",
+            message=sfn.TaskInput.from_text("Snapshot created for EC2Isolate_ASG_Instance"),
+            subject="Alert!! Snapshot created",
+            topic=EC2Isolate_topic,
+            result_path = sfn.JsonPath.DISCARD
+        )
+        
+        # Add Tag Status = Quarantined
+        
+        Create_ec2_tag = tasks.CallAwsService(self, "create_ec2_tag",
+            service="ec2",
+            action="createTags",
+            parameters={
+                "Resources": sfn.JsonPath.string_at("States.Array($.InstanceId)"),
+                "Tags": [
+                    {
+                        "Key": "Status",
+                        "Value": "Quarantine"
+                    }
+                ]
+            },
+            #input_path = sfn.JsonPath.string_at("States.Array($.InstanceId)"),
+            result_path=sfn.JsonPath.string_at("$.InstanceTags"),
+            iam_resources=["*"])
+        
+        # Notify tag added using SNS
+        
+        sns_for_tag_added = tasks.SnsPublish(
+            self,
+            "SNS for Tagging",
+            message=sfn.TaskInput.from_text("Tag Status=Quarantied added to EC2Isolate_ASG_Instance"),
+            subject="Alert!! Tag Added",
+            topic=EC2Isolate_topic,
+            result_path = sfn.JsonPath.DISCARD
+        )
+        
+        
+        # Create forensic instance
+         
+        Create_forensic_instance = tasks.CallAwsService(self, "Create Forensic Instance",
+            service="ec2",
+            action="runInstances",
+            parameters={
+                "MaxCount": 1,
+                "MinCount": 1,
+                "InstanceType": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].InstanceType"),
+                "ImageId": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].ImageId"),
+                "SubnetId": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].NetworkInterfaces[0].SubnetId"),
+                "SecurityGroupIds": sfn.JsonPath.string_at("States.Array($.CreateSG.GroupId)") 
+            },
+            iam_resources=["*"],
+            result_selector={
+                "ForensicInstanceId": sfn.JsonPath.string_at("$.Instances[0].InstanceId")
+            }
+        )
+
+        
+        # Create EBS volume from the snapshot
+        
+        Create_ebs_volume_from_snaphot = tasks.CallAwsService(self, "Create EBS Volume from Snapshot",
+            service="ec2",
+            action="createVolume",
+            parameters={
+                "AvailabilityZone": sfn.JsonPath.string_at("$.InstanceDescription.Reservations[0].Instances[0].Placement.AvailabilityZone"),
+                "SnapshotId": sfn.JsonPath.string_at("$.SnapshotId.SnapshotId")
+            },
+            iam_resources=["*"],
+            result_path=sfn.JsonPath.string_at("$.Volumes")
+        )
+        
+        # Verify EBS Volume status
+        
+        Verify_ebs_volume_creation_status = tasks.CallAwsService(self, "Verify EBS Volume Creation",
+            service="ec2",
+            action="describeVolumes",
+            parameters={
+                "VolumeIds": sfn.JsonPath.string_at("States.Array($.Volumes.VolumeId)")
+            },
+            iam_resources=["*"],
+            result_path=sfn.JsonPath.string_at("$.VolumeDescription")
+        )
+        
+        Is_ebs_volume_created = sfn.Choice(
+            self, "Is EBS Volume creation complete?")
+        
+        ebs_volume_creation_not_completed = sfn.Condition.not_(sfn.Condition.string_equals(variable="$.VolumeDescription.Volumes[0].State",value="available"))
+        
+        wait_for_volume_creation = sfn.Wait(
+            self, "Wait for Volume to be created", time=sfn.WaitTime.duration(Duration.seconds(20)))
+            
+        ebs_volume_creation_completed = sfn.Pass(
+            self, "EBS Volume Creation from Snapshot is Completed")
+    
+        # Attach volume to the forensic instance
+        
+        Attach_volume_to_forensic_Instance = tasks.CallAwsService(self, "Attach Volume to forensic instance",
+            service="ec2",
+            action="attachVolume",
+            parameters={
+                "Device": "/dev/sdf",
+                "InstanceId": sfn.JsonPath.string_at("$[0].ForensicInstanceId"),
+                "VolumeId": sfn.JsonPath.string_at("$[1].Volumes.VolumeId")
+            },
+            iam_resources=["*"],
+            result_path=sfn.JsonPath.DISCARD
+
+        )
+        
+        allow_ingress_to_forensic_instance = tasks.CallAwsService(self, " Allow Ingress rule to Forensic Instance",
+        service="ec2",
+        action="authorizeSecurityGroupIngress",
+        parameters={
+            "GroupId": sfn.JsonPath.string_at("$[1].ForensicInstanceSG.GroupId"),
+            "IpPermissions": [
+                {
+                    "IpProtocol": "tcp",
+                    "FromPort": 22,
+                    "ToPort" : 22,
+                    "UserIdGroupPairs": [
+                        {
+                            "GroupId": sfn.JsonPath.string_at("$[1].ForensicInstanceSG.GroupId")
+                            
+                        }
+                        ]
+                }
+                ]
+        },
+        iam_resources=["*"],
+        result_path=sfn.JsonPath.DISCARD
+        )
+        
+        # Task to add Parallel execution flow to stepfunction        
+        parallel_Execution = sfn.Parallel(self, "Parallel Execution")
+
+        parallel_Execution.branch(Create_forensic_instance)
+        
+        parallel_Execution.branch(Create_Snapshot.next(Verify_snapshot_creation_status).next(Is_snapshot_creation_complete.when(
+                Snapshot_creation_successful,sns_for_create_snaphot.next(Create_ec2_tag).next(sns_for_tag_added).next(Create_ebs_volume_from_snaphot).next(Verify_ebs_volume_creation_status).next(Is_ebs_volume_created.when(
+                        ebs_volume_creation_not_completed, wait_for_volume_creation.next(Verify_ebs_volume_creation_status)
+                    ).otherwise(ebs_volume_creation_completed))
+            ).otherwise(wait_for_snaphot_creation.next(Verify_snapshot_creation_status))))
+
+        
+        # provide statemachine definition
+        sm_definition = sfn.Chain.start(Collect_Instance_Metadata).next(Enable_Termination_Protection).next(Create_ec2_IsolatedSG).next(Modify_Instance_SG).next(Create_ForensicSG).next(Verify_ASG_Attachment).next(ASG_Choice.when
+                    (
+                        ASG_Attachment_Info, Detach_Instance_from_ASG
+                    ).afterwards(include_otherwise=True)).next(parallel_Execution).next(Attach_volume_to_forensic_Instance).next(allow_ingress_to_forensic_instance)
+        
+        
+        # Create State machine  
+        
+        EC2Isolate_StateMachine = sfn.StateMachine(self, "EC2Isolate_StateMachine",
+            state_machine_name = "EC2Isolate_StateMachine",
+            definition=sm_definition
+            )
+
+        CfnOutput(self, "EC2Isolate_StateMachineARN", description="Get EC2Isolate_StateMachine ARN",
+            value=EC2Isolate_StateMachine.state_machine_arn       
+        )
+
+        CfnOutput(self, "EC2Isolate_StateMachineURL", description="Get EC2Isolate_StateMachine URL",
+            value=Fn.sub("https://${AWS::Region}.console.aws.amazon.com/states/home?region=${AWS::Region}#/statemachines/view/${EC2Isolate_StateMachine}",
+               {"EC2Isolate_StateMachine": EC2Isolate_StateMachine.state_machine_arn}
+            )       
+        )    
